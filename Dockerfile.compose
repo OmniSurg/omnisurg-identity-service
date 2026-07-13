@@ -24,9 +24,12 @@ COPY omnisurg-identity-service/ ./omnisurg-identity-service/
 WORKDIR /src/omnisurg-identity-service
 RUN go mod download
 
-# Build the server and the seed binary for this service.
+# Build the server, the seed binary, and the operator bootstrap one-shot for
+# this service. bootstrap-operator creates the first provider super-admin on a
+# non-local environment; it is baked in so the deployed image can run it once.
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/seed ./cmd/seed
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/bootstrap-operator ./cmd/bootstrap-operator
 
 # Build the golang-migrate CLI (postgres driver) so the entrypoint can run
 # migrations without a host toolchain. Version matches the service Makefile pin.
@@ -39,10 +42,11 @@ RUN apk add --no-cache ca-certificates wget && \
 WORKDIR /app
 COPY --from=builder /bin/server ./server
 COPY --from=builder /bin/seed ./seed
+COPY --from=builder /bin/bootstrap-operator ./bootstrap-operator
 COPY --from=builder /go/bin/migrate ./migrate
 COPY --from=builder /src/omnisurg-identity-service/migrations ./migrations
 COPY --from=builder /src/omnisurg-identity-service/docker/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh ./migrate ./server ./seed
+RUN chmod +x ./entrypoint.sh ./migrate ./server ./seed ./bootstrap-operator
 USER omnisurg
 EXPOSE 8081 9081
 ENTRYPOINT ["/app/entrypoint.sh"]

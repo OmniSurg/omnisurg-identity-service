@@ -27,10 +27,13 @@ RUN go mod edit -dropreplace=github.com/OmniSurg/omnisurg-go-common \
     go get github.com/OmniSurg/omnisurg-go-common@${GO_COMMON_VERSION} && \
     go get github.com/OmniSurg/omnisurg-proto/gen/go@${PROTO_VERSION} && \
     go mod tidy
-# The server, the per-service seed helper, and the golang-migrate CLI so the
-# entrypoint can migrate without a host toolchain (version matches the Makefile).
+# The server, the per-service seed helper, the operator bootstrap one-shot (used
+# once per non-local environment to create the first provider super-admin), and
+# the golang-migrate CLI so the entrypoint can migrate without a host toolchain
+# (version matches the Makefile).
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/seed ./cmd/seed
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/bootstrap-operator ./cmd/bootstrap-operator
 RUN CGO_ENABLED=0 GOOS=linux go install -tags 'postgres' \
     github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1
 
@@ -40,10 +43,11 @@ RUN apk add --no-cache ca-certificates wget && \
 WORKDIR /app
 COPY --from=builder /bin/server ./server
 COPY --from=builder /bin/seed ./seed
+COPY --from=builder /bin/bootstrap-operator ./bootstrap-operator
 COPY --from=builder /go/bin/migrate ./migrate
 COPY --from=builder /app/migrations ./migrations
 COPY --from=builder /app/docker/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh ./migrate ./server ./seed
+RUN chmod +x ./entrypoint.sh ./migrate ./server ./seed ./bootstrap-operator
 USER omnisurg
 EXPOSE 8081 9081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
