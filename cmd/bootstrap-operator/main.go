@@ -101,4 +101,5 @@ func printResult(r bootstrap.Result) {
 	fmt.Printf("  otpauth uri: %s\n", r.OtpauthURI)
 	fmt.Println()
 	fmt.Println("Enrol an authenticator app with this secret or otpauth uri now. It will not be shown again.")
+	fmt.Println("Run this once, interactively. Do not capture this output in shared or CI logs. This secret is shown only now and cannot be retrieved later.")
 }

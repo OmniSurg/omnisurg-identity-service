@@ -54,12 +54,21 @@ type Result struct {
 // already present it returns Result{Created: false} so the command is safe to
 // re-run in a deploy pipeline and never re-mints a secret for an already
 // enrolled operator. Otherwise it generates a fresh random TOTP secret,
-// encrypts the email, hashes the password, creates the user as a provider
-// super-admin under the platform tenant, stores the secret, and marks the user
-// enrolled so provider login lands in the TOTP_REQUIRED state (matching the
-// demo seed). This command is a serial one-shot; the count guard is not a
-// substitute for a lock under concurrent invocation, which is not a supported
-// mode.
+// encrypts the email, hashes the password, and hands all three to a SINGLE
+// atomic repository write that creates the user as a provider super-admin under
+// the platform tenant, stores the secret, and marks the user enrolled so
+// provider login lands in the TOTP_REQUIRED state (matching the demo seed).
+// Doing the create-plus-enrol as one transaction keeps the count guard
+// truthful: there is no window in which a row exists but is not fully
+// provisioned, so a failed run never leaves an operator that a later run would
+// mistake for complete.
+//
+// This command is a serial one-shot; the count guard is not a substitute for a
+// lock under concurrent invocation, which is not a supported mode. Note also
+// that if the sole operator was previously soft-deleted, the count returns 0 but
+// re-creating with the SAME email surfaces model.ErrEmailTaken, because the
+// per-tenant email_hash unique index retains soft-deleted rows; recover by using
+// a different email.
 func Run(ctx context.Context, repo *repository.UserRepository, keyring *security.Keyring, p Params) (Result, error) {
 	existing, err := repo.CountProviderSuperAdmins(ctx)
 	if err != nil {
@@ -82,21 +91,13 @@ func Run(ctx context.Context, repo *repository.UserRepository, keyring *security
 		return Result{}, fmt.Errorf("hash operator password: %w", err)
 	}
 
-	user, err := repo.Create(ctx, model.PlatformTenantID, model.NewUser{
+	if _, err := repo.CreateEnrolledProviderOperator(ctx, model.PlatformTenantID, model.NewUser{
 		TenantID:     model.PlatformTenantID,
 		Email:        p.Email,
 		DisplayName:  p.DisplayName,
 		ProviderRole: model.RoleProviderSuperAdmin,
-	}, string(enc), hash)
-	if err != nil {
+	}, string(enc), hash, secret); err != nil {
 		return Result{}, fmt.Errorf("create operator: %w", err)
-	}
-
-	if err := repo.SetTotpSecret(ctx, model.PlatformTenantID, user.ID, secret); err != nil {
-		return Result{}, fmt.Errorf("store operator two-factor secret: %w", err)
-	}
-	if err := repo.SetMfaEnrolled(ctx, model.PlatformTenantID, user.ID, true); err != nil {
-		return Result{}, fmt.Errorf("enrol operator for two factor: %w", err)
 	}
 
 	return Result{
