@@ -195,6 +195,45 @@ func TestGetReturnsErrorWhenEmailUndecryptable(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestCountProviderSuperAdmins(t *testing.T) {
+	repo, kr := setup(t)
+	ctx := context.Background()
+
+	// Empty platform tenant: no operators yet.
+	count, err := repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+
+	// One provider super-admin under the platform tenant.
+	hash, err := security.HashPassword("password123")
+	require.NoError(t, err)
+	enc, err := kr.Cipher().Encrypt([]byte("operator@omnisurg.test"))
+	require.NoError(t, err)
+	op, err := repo.Create(ctx, model.PlatformTenantID, model.NewUser{
+		TenantID:     model.PlatformTenantID,
+		Email:        "operator@omnisurg.test",
+		DisplayName:  "Operator",
+		ProviderRole: model.RoleProviderSuperAdmin,
+	}, string(enc), hash)
+	require.NoError(t, err)
+
+	count, err = repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	// A tenant user with a normal role under a real tenant is not counted.
+	mustCreate(t, repo, kr, tenantA, "reception@acme.test", model.RoleReception)
+	count, err = repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	// A soft-deleted provider super-admin drops out of the count.
+	require.NoError(t, repo.SoftDelete(ctx, model.PlatformTenantID, op.ID))
+	count, err = repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+}
+
 func TestUpdateAndSoftDelete(t *testing.T) {
 	repo, kr := setup(t)
 	u := mustCreate(t, repo, kr, tenantA, "edit@acme.test", model.RoleReception)

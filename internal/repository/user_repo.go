@@ -157,6 +157,27 @@ func (r *UserRepository) List(ctx context.Context, tenantID uuid.UUID, limit, of
 	return users, total, nil
 }
 
+// CountProviderSuperAdmins returns the number of live provider super-admins
+// under the platform tenant. The operator bootstrap uses it to stay a safe
+// one-shot: it refuses to create a second operator once one exists. It runs
+// under the platform tenant scope via WithTenant, so RLS confines the count to
+// the platform registry exactly like the sibling reads.
+func (r *UserRepository) CountProviderSuperAdmins(ctx context.Context) (int64, error) {
+	var count int64
+	err := pg.WithTenant(ctx, r.pool, model.PlatformTenantID.String(), func(ctx context.Context, conn pg.Conn) error {
+		c, qerr := db.New(conn).CountProviderSuperAdmins(ctx, model.RoleProviderSuperAdmin)
+		if qerr != nil {
+			return fmt.Errorf("count provider super admins: %w", qerr)
+		}
+		count = c
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // Update mutates display name or status.
 func (r *UserRepository) Update(ctx context.Context, tenantID, id uuid.UUID, upd model.UserUpdate) (model.User, error) {
 	var out model.User

@@ -29,6 +29,10 @@ type Querier interface {
 	// accepted step is nulled too so a fresh re-enrolment starts with clean replay
 	// state (a reset resets all TOTP state, not just the secret).
 	ClearTotp(ctx context.Context, id pgtype.UUID) error
+	// Counts live provider super-admins under the caller tenant (the platform
+	// tenant, set by WithTenant). Used by the operator bootstrap to stay a safe
+	// one-shot: it refuses to create a second operator once one exists.
+	CountProviderSuperAdmins(ctx context.Context, providerRole string) (int64, error)
 	CountUsers(ctx context.Context) (int64, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	// queries/keys.sql
