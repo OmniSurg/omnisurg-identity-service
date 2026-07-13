@@ -157,6 +157,112 @@ func (r *UserRepository) List(ctx context.Context, tenantID uuid.UUID, limit, of
 	return users, total, nil
 }
 
+// CreateEnrolledProviderOperator inserts a provider operator and enrols it for
+// two factor in ONE transaction: the user insert, the TOTP secret write, and the
+// mfa_enrolled flip are all-or-nothing. This keeps the operator-bootstrap count
+// guard truthful: a half-provisioned operator (a row with no secret, or not
+// enrolled) can never be persisted, so a later run never mistakes an incomplete
+// insert for a done one. It encrypts plainTotpSecret with the keyring exactly
+// like SetTotpSecret does, and enforces role exclusivity up front like Create.
+// The standalone SetTotpSecret and SetMfaEnrolled remain for the enrolment-
+// confirm path, which mutates an already existing user.
+func (r *UserRepository) CreateEnrolledProviderOperator(ctx context.Context, tenantID uuid.UUID, in model.NewUser, emailEncrypted, passwordHash, plainTotpSecret string) (model.User, error) {
+	if err := model.ValidateRoleExclusivity(in); err != nil {
+		return model.User{}, err
+	}
+	if plainTotpSecret == "" {
+		return model.User{}, fmt.Errorf("create enrolled provider operator: empty totp secret")
+	}
+	encSecret, err := r.keyring.Cipher().Encrypt([]byte(plainTotpSecret))
+	if err != nil {
+		return model.User{}, fmt.Errorf("encrypt totp secret: %w", err)
+	}
+
+	var out model.User
+	err = pg.WithTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pg.Conn) error {
+		tx, berr := conn.Begin(ctx)
+		if berr != nil {
+			return fmt.Errorf("begin tx: %w", berr)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		q := db.New(tx)
+
+		row, qerr := q.CreateUser(ctx, db.CreateUserParams{
+			TenantID:       pgUUID(tenantID),
+			BranchID:       pgUUIDPtr(in.BranchID),
+			EmailEncrypted: []byte(emailEncrypted),
+			EmailHash:      r.keyring.EmailBlindIndex(in.Email),
+			PasswordHash:   passwordHash,
+			DisplayName:    in.DisplayName,
+			Role:           in.Role,
+			ProviderRole:   in.ProviderRole,
+		})
+		if qerr != nil {
+			if isUniqueViolation(qerr) {
+				return model.ErrEmailTaken
+			}
+			return fmt.Errorf("create user: %w", qerr)
+		}
+		if serr := q.SetTotpSecret(ctx, db.SetTotpSecretParams{ID: row.ID, TotpSecret: encSecret}); serr != nil {
+			return fmt.Errorf("set totp secret: %w", serr)
+		}
+		if merr := q.SetMfaEnrolled(ctx, db.SetMfaEnrolledParams{ID: row.ID, MfaEnrolled: true}); merr != nil {
+			return fmt.Errorf("set mfa enrolled: %w", merr)
+		}
+
+		u, derr := r.toDomain(userRow{
+			ID:             row.ID,
+			TenantID:       row.TenantID,
+			BranchID:       row.BranchID,
+			EmailEncrypted: row.EmailEncrypted,
+			DisplayName:    row.DisplayName,
+			Role:           row.Role,
+			ProviderRole:   row.ProviderRole,
+			Status:         row.Status,
+			MfaEnrolled:    row.MfaEnrolled,
+			CreatedAt:      row.CreatedAt,
+			UpdatedAt:      row.UpdatedAt,
+		})
+		if derr != nil {
+			return derr
+		}
+		// CreateUser returns the pre-flip row (mfa_enrolled false), so reflect the
+		// enrolled state this transaction just set for an accurate domain view.
+		u.MFAEnrolled = true
+
+		if cerr := tx.Commit(ctx); cerr != nil {
+			return fmt.Errorf("commit tx: %w", cerr)
+		}
+		out = u
+		return nil
+	})
+	if err != nil {
+		return model.User{}, err
+	}
+	return out, nil
+}
+
+// CountProviderSuperAdmins returns the number of live provider super-admins
+// under the platform tenant. The operator bootstrap uses it to stay a safe
+// one-shot: it refuses to create a second operator once one exists. It runs
+// under the platform tenant scope via WithTenant, so RLS confines the count to
+// the platform registry exactly like the sibling reads.
+func (r *UserRepository) CountProviderSuperAdmins(ctx context.Context) (int64, error) {
+	var count int64
+	err := pg.WithTenant(ctx, r.pool, model.PlatformTenantID.String(), func(ctx context.Context, conn pg.Conn) error {
+		c, qerr := db.New(conn).CountProviderSuperAdmins(ctx, model.RoleProviderSuperAdmin)
+		if qerr != nil {
+			return fmt.Errorf("count provider super admins: %w", qerr)
+		}
+		count = c
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // Update mutates display name or status.
 func (r *UserRepository) Update(ctx context.Context, tenantID, id uuid.UUID, upd model.UserUpdate) (model.User, error) {
 	var out model.User

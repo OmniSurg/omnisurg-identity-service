@@ -78,6 +78,13 @@ LIMIT $1 OFFSET $2;
 -- name: CountUsers :one
 SELECT COUNT(*) FROM users;
 
+-- name: CountProviderSuperAdmins :one
+-- Counts live provider super-admins under the caller tenant (the platform
+-- tenant, set by WithTenant). Used by the operator bootstrap to stay a safe
+-- one-shot: it refuses to create a second operator once one exists.
+SELECT COUNT(*) FROM users
+WHERE provider_role = $1 AND status <> 'deleted';
+
 -- name: UpdateUser :one
 UPDATE users
 SET display_name = COALESCE(sqlc.narg('display_name'), display_name),

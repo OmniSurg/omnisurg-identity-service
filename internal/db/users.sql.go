@@ -94,6 +94,21 @@ func (q *Queries) ClearTotp(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const countProviderSuperAdmins = `-- name: CountProviderSuperAdmins :one
+SELECT COUNT(*) FROM users
+WHERE provider_role = $1 AND status <> 'deleted'
+`
+
+// Counts live provider super-admins under the caller tenant (the platform
+// tenant, set by WithTenant). Used by the operator bootstrap to stay a safe
+// one-shot: it refuses to create a second operator once one exists.
+func (q *Queries) CountProviderSuperAdmins(ctx context.Context, providerRole string) (int64, error) {
+	row := q.db.QueryRow(ctx, countProviderSuperAdmins, providerRole)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countUsers = `-- name: CountUsers :one
 SELECT COUNT(*) FROM users
 `
