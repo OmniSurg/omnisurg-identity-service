@@ -1,0 +1,41 @@
+# CI caller for omnisurg-identity-service (compose service: identity-service).
+#
+# The reusable workflows referenced here live in omnisurg-infrastructure. Neither
+# this file nor the reusable workflows contain the VPS host or any secret; hosts
+# and credentials arrive only through ${{ secrets.* }} / ${{ vars.* }}.
+name: ci
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+# One in-flight run per ref; a newer push cancels an older queued run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Local gate on every push and PR; builds and pushes the private ghcr image on
+  # a push to develop (:sha, :staging) or main (:sha, :prod).
+  ci:
+    uses: OmniSurg/omnisurg-infrastructure/.github/workflows/reusable-go-service-ci.yml@main
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+
+  # GATED deploy. Both deploy jobs (staging, production) live in the reusable
+  # workflow, each carrying its own `if: vars.DEPLOY_<ENV>_ENABLED` guard AND its
+  # `environment:` binding; the production Environment is approval-protected.
+  deploy:
+    needs: ci
+    uses: OmniSurg/omnisurg-infrastructure/.github/workflows/reusable-deploy.yml@main
+    with:
+      compose_service: identity-service
+      image_tag: ${{ github.sha }}
+    secrets: inherit

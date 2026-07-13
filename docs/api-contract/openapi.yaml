@@ -1,0 +1,977 @@
+openapi: 3.0.3
+info:
+  title: OmniSurg Identity Service
+  version: 0.1.0
+  description: Authentication, users, and RBAC for the OmniSurg platform.
+servers:
+  - url: http://localhost:8081
+    description: Local
+tags:
+  - name: health
+  - name: auth
+  - name: users
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+    HealthData:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+    HealthResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/HealthData'
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+    LoginData:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/User'
+    LoginResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/LoginData'
+    ProviderLoginData:
+      type: object
+      required: [token, mfa_status]
+      properties:
+        token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        mfa_status:
+          type: string
+          enum: [ENROLL_REQUIRED, TOTP_REQUIRED]
+          description: >-
+            Whether the provider must first enrol a second factor
+            (ENROLL_REQUIRED) or supply a code from an already enrolled one
+            (TOTP_REQUIRED). The token returned here is always partial; a full
+            session token is issued by the confirm or verify step.
+    ProviderLoginResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/ProviderLoginData'
+    TotpEnrollData:
+      type: object
+      required: [secret, otpauth_uri]
+      properties:
+        secret:
+          type: string
+          description: The base32 shared secret, shown once for manual entry.
+        otpauth_uri:
+          type: string
+          description: The provisioning link an authenticator app scans as a QR code.
+    TotpEnrollResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/TotpEnrollData'
+    TotpCodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: The 6 digit code from the authenticator app.
+          minLength: 6
+          maxLength: 10
+    TotpTokenData:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: A full session token with the second factor satisfied.
+        expires_at:
+          type: string
+          format: date-time
+    TotpTokenResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/TotpTokenData'
+    TotpResetData:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+    TotpResetResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/TotpResetData'
+    User:
+      type: object
+      required: [id, tenant_id, email, display_name, role, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        branch_id:
+          type: string
+          format: uuid
+          nullable: true
+        email:
+          type: string
+        display_name:
+          type: string
+        role:
+          type: string
+        provider_role:
+          type: string
+        status:
+          type: string
+        mfa_enrolled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UserResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/User'
+    UsersListData:
+      type: object
+      required: [users]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        total_count:
+          type: integer
+          format: int64
+    UsersListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/UsersListData'
+    CreateUserRequest:
+      type: object
+      required: [email, password, display_name, role]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        display_name:
+          type: string
+          minLength: 1
+        role:
+          type: string
+        branch_id:
+          type: string
+          format: uuid
+          nullable: true
+    UpdateUserRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+        status:
+          type: string
+          enum: [active, suspended]
+    DeleteUserData:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+    DeleteUserResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/DeleteUserData'
+paths:
+  /api/v1/identity/health:
+    get:
+      operationId: getHealth
+      summary: Liveness and readiness probe
+      tags: [health]
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+      x-fr:
+        - "returns 200 with status ok and service identity when the database is reachable"
+      x-nfr:
+        latency_ms_p99: 50
+        rate_limit: "none"
+        auth_required: false
+        tenant_scoped: false
+  /api/v1/identity/login:
+    post:
+      operationId: login
+      summary: Authenticate a tenant user and issue a JWT
+      tags: [auth]
+      parameters:
+        - in: header
+          name: X-Tenant-ID
+          required: false
+          description: >-
+            Tenant scope resolved upstream from the subdomain. Modelled as
+            optional in the schema so the generated wrapper does not reject a
+            missing header with a 400; the handler enforces presence and returns
+            401 AUTH_TENANT_MISSING when it is absent.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Bad credentials or missing tenant header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with a signed JWT and the user body when email and password match within the tenant from X-Tenant-ID"
+        - "returns 401 AUTH_TENANT_MISSING when the X-Tenant-ID header is absent"
+        - "returns 401 AUTH_BAD_CREDENTIALS when the email is unknown in the tenant"
+        - "returns 401 AUTH_BAD_CREDENTIALS when the password does not match"
+        - "returns 422 VALIDATION_FAILED when the body is missing email or password"
+        - "writes an identity.login audit log row for the authenticated user"
+        - "does not leak whether the email exists; unknown email and wrong password both return AUTH_BAD_CREDENTIALS"
+      x-nfr:
+        latency_ms_p99: 400
+        rate_limit: "10/min/ip"
+        auth_required: false
+        tenant_scoped: true
+        audit_action: "identity.login"
+        idempotency_required: false
+        encryption_fields: ["email"]
+  /api/v1/identity/provider/login:
+    post:
+      operationId: providerLogin
+      summary: Authenticate a provider (platform) user and issue a tenant less JWT
+      tags: [auth]
+      description: >-
+        Provider (platform) users belong to no practice. This endpoint takes no
+        tenant header. On success it issues a JWT whose provider_role is set and
+        whose tenant_id is empty.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderLoginResponse'
+        '401':
+          description: Bad credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with a partial signed JWT (mfa_verified false) whose provider_role is set and tenant_id is empty when a provider email and password match"
+        - "returns mfa_status ENROLL_REQUIRED when the provider has not enrolled a second factor"
+        - "returns mfa_status TOTP_REQUIRED when the provider has already enrolled a second factor"
+        - "requires no X-Tenant-ID header"
+        - "returns 401 AUTH_BAD_CREDENTIALS when the email is unknown"
+        - "returns 401 AUTH_BAD_CREDENTIALS when the password does not match"
+        - "returns 401 AUTH_BAD_CREDENTIALS when the account has no provider access"
+        - "returns 401 AUTH_BAD_CREDENTIALS when the account is not active"
+        - "returns 422 VALIDATION_FAILED when the body is missing email or password"
+        - "does not reveal whether the email exists or whether it has provider access; every failure returns the same AUTH_BAD_CREDENTIALS"
+        - "writes an identity.provider_login audit log row for the authenticated provider user"
+      x-nfr:
+        latency_ms_p99: 400
+        rate_limit: "10/min/ip"
+        auth_required: false
+        tenant_scoped: false
+        audit_action: "identity.provider_login"
+        idempotency_required: false
+        encryption_fields: ["email"]
+  /api/v1/identity/provider/totp/enroll:
+    post:
+      operationId: providerTotpEnroll
+      summary: Start two factor enrolment for the signed in provider
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      description: >-
+        Generates a fresh second factor secret for the signed in provider and
+        returns it with a provisioning link. The provider belongs to no
+        practice; the account acted on is always the token subject, so no user
+        id is accepted. The secret is stored but not yet active until the
+        provider confirms a code.
+      responses:
+        '200':
+          description: Enrolment started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpEnrollResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Already enrolled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with a fresh secret and otpauth uri for the signed in provider"
+        - "acts only on the token subject; the request carries no user id field"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing or expired"
+        - "returns 403 AUTH_FORBIDDEN when the caller is not a provider user"
+        - "returns 409 MFA_ALREADY_ENROLLED when the provider has already completed enrolment"
+        - "a second enrol before confirming overwrites the unconfirmed secret"
+      x-nfr:
+        latency_ms_p99: 300
+        rate_limit: "10/min/user"
+        auth_required: true
+        tenant_scoped: false
+        idempotency_required: false
+        encryption_fields: ["totp_secret"]
+  /api/v1/identity/provider/totp/confirm:
+    post:
+      operationId: providerTotpConfirm
+      summary: Confirm two factor enrolment and start a full session
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      description: >-
+        Verifies a code against the enrolled secret, activates the second factor
+        for the signed in provider, and returns a full session token. The
+        account acted on is always the token subject, so no user id is accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpCodeRequest'
+      responses:
+        '200':
+          description: Confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpTokenResponse'
+        '401':
+          description: Unauthorized or wrong code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Not enrolled yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with a full session token when the code matches the enrolled secret"
+        - "acts only on the token subject; the request carries no user id field"
+        - "returns 401 MFA_INVALID_CODE when the code is wrong or expired"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing or expired"
+        - "returns 403 AUTH_FORBIDDEN when the caller is not a provider user"
+        - "returns 409 MFA_NOT_ENROLLED when no secret has been enrolled"
+        - "returns 422 VALIDATION_FAILED when the code is missing"
+        - "writes an identity.provider_totp.confirm audit log row"
+      x-nfr:
+        latency_ms_p99: 300
+        rate_limit: "10/min/user"
+        auth_required: true
+        tenant_scoped: false
+        audit_action: "identity.provider_totp.confirm"
+        idempotency_required: false
+        encryption_fields: ["totp_secret"]
+        replay_prevented: true
+        replay_note: "an accepted code cannot be reused within its skew window; the highest accepted time step is stored and a same or older step is rejected (RFC 6238 section 5.2)"
+  /api/v1/identity/provider/totp/verify:
+    post:
+      operationId: providerTotpVerify
+      summary: Complete sign in with a two factor code
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      description: >-
+        The login second factor: an enrolled provider supplies a code and
+        receives a full session token. The account acted on is always the token
+        subject, so no user id is accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpCodeRequest'
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpTokenResponse'
+        '401':
+          description: Unauthorized or wrong code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Not enrolled yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with a full session token when an enrolled provider supplies a valid code"
+        - "acts only on the token subject; the request carries no user id field"
+        - "returns 401 MFA_INVALID_CODE when the code is wrong or expired"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing or expired"
+        - "returns 403 AUTH_FORBIDDEN when the caller is not a provider user"
+        - "returns 409 MFA_NOT_ENROLLED when the provider has not completed enrolment"
+        - "returns 422 VALIDATION_FAILED when the code is missing"
+        - "writes an identity.provider_totp.verify audit log row"
+      x-nfr:
+        latency_ms_p99: 300
+        rate_limit: "10/min/user"
+        auth_required: true
+        tenant_scoped: false
+        audit_action: "identity.provider_totp.verify"
+        idempotency_required: false
+        encryption_fields: ["totp_secret"]
+        replay_prevented: true
+        replay_note: "an accepted code cannot be reused within its skew window; the highest accepted time step is stored and a same or older step is rejected (RFC 6238 section 5.2)"
+  /api/v1/identity/provider/users/{id}/totp/reset:
+    post:
+      operationId: providerTotpReset
+      summary: Reset a provider's two factor sign in
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      description: >-
+        A platform super admin clears another provider's second factor so their
+        next sign in starts enrolment again. Restricted to super admins; the
+        action records both the acting super admin and the target.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpResetResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 and clears the target provider's second factor when the caller is provider_super_admin"
+        - "the target's next sign in is enrol required"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing or expired"
+        - "returns 403 AUTH_FORBIDDEN when the caller is provider_support or provider_billing"
+        - "returns 403 AUTH_FORBIDDEN when the caller is a tenant user"
+        - "returns 404 USER_NOT_FOUND when the target id is unknown"
+        - "writes an identity.provider_totp.reset audit log row recording both the actor and the target"
+      x-nfr:
+        latency_ms_p99: 300
+        rate_limit: "10/min/user"
+        auth_required: true
+        tenant_scoped: false
+        audit_action: "identity.provider_totp.reset"
+        idempotency_required: false
+        encryption_fields: ["totp_secret"]
+  /api/v1/identity/me:
+    get:
+      operationId: getMe
+      summary: Return the authenticated user
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with the caller's user body derived from the JWT subject"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing or expired"
+      x-nfr:
+        latency_ms_p99: 200
+        rate_limit: "120/min/user"
+        auth_required: true
+        tenant_scoped: true
+        encryption_fields: ["email"]
+  /api/v1/identity/users:
+    post:
+      operationId: createUser
+      summary: Create a user in the caller's tenant
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: X-Idempotency-Key
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Email already exists in tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 201 with the created user when caller is practice_admin and the body is valid"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing"
+        - "returns 403 AUTH_FORBIDDEN when the caller role is reception"
+        - "returns 409 USER_EMAIL_TAKEN when the email already exists in the tenant"
+        - "returns 422 VALIDATION_FAILED when email, password, display_name, or role is missing or invalid"
+        - "stores email encrypted and never returns the password hash"
+        - "writes an identity.user.create audit log row"
+        - "a repeated X-Idempotency-Key returns the first response without creating a second row"
+      x-nfr:
+        latency_ms_p99: 400
+        rate_limit: "60/min/user"
+        auth_required: true
+        tenant_scoped: true
+        audit_action: "identity.user.create"
+        idempotency_required: true
+        encryption_fields: ["email"]
+    get:
+      operationId: listUsers
+      summary: List users in the caller's tenant
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with the tenant's users when caller is practice_admin or reception"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing"
+        - "returns 403 AUTH_FORBIDDEN when the caller role is clinician_ophthalmologist"
+        - "a cross tenant caller never sees another tenant's users"
+      x-nfr:
+        latency_ms_p99: 300
+        rate_limit: "120/min/user"
+        auth_required: true
+        tenant_scoped: true
+        encryption_fields: ["email"]
+  /api/v1/identity/users/{id}:
+    get:
+      operationId: getUser
+      summary: Fetch a user by id
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with the user when it exists in the caller's tenant and caller is practice_admin or reception"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing"
+        - "returns 403 AUTH_FORBIDDEN when the caller role is clinician_ophthalmologist"
+        - "returns 404 USER_NOT_FOUND when no user with that id exists in the caller's tenant"
+        - "returns 404 USER_NOT_FOUND when the id belongs to another tenant"
+      x-nfr:
+        latency_ms_p99: 200
+        rate_limit: "120/min/user"
+        auth_required: true
+        tenant_scoped: true
+        encryption_fields: ["email"]
+    patch:
+      operationId: updateUser
+      summary: Update a user's display name or status
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with the updated user when caller is practice_admin"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing"
+        - "returns 403 AUTH_FORBIDDEN when the caller role is reception"
+        - "returns 404 USER_NOT_FOUND when the id is unknown in the caller's tenant"
+        - "writes an identity.user.update audit log row"
+      x-nfr:
+        latency_ms_p99: 300
+        rate_limit: "60/min/user"
+        auth_required: true
+        tenant_scoped: true
+        audit_action: "identity.user.update"
+        idempotency_required: false
+        encryption_fields: ["email"]
+    delete:
+      operationId: deleteUser
+      summary: Soft delete a user
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Soft deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteUserResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 and sets status deleted when caller is practice_admin"
+        - "returns 401 AUTH_UNAUTHORIZED when the Authorization header is missing"
+        - "returns 403 AUTH_FORBIDDEN when the caller role is reception"
+        - "returns 404 USER_NOT_FOUND when the id is unknown in the caller's tenant"
+        - "writes an identity.user.delete audit log row"
+      x-nfr:
+        latency_ms_p99: 300
+        rate_limit: "60/min/user"
+        auth_required: true
+        tenant_scoped: true
+        audit_action: "identity.user.delete"
+        idempotency_required: false

@@ -1,0 +1,7 @@
+bin/
+.git/
+.env
+*.local
+smoke/credentials.json
+SCRATCH.md
+NOTES.md

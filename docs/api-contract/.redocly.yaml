@@ -1,0 +1,11 @@
+extends:
+  - minimal
+rules:
+  operation-operationId: error
+  operation-summary: error
+  operation-tag-defined: off
+  tag-description: off
+  info-license: off
+  no-server-example.com: off
+  operation-4xx-response: off
+  security-defined: off

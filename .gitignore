@@ -1,0 +1,25 @@
+# Build output
+/bin/
+
+# Local env and secrets
+.env
+*.local
+
+# Smoke test real credentials (only the example is committed)
+smoke/credentials.json
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/
+
+# Vibe coded working notes never get tracked
+SCRATCH.md
+NOTES.md
+TODO.local.md
+
+# Internal engineering documentation is not published to the public repo.
+# Exclude every Markdown file (including CLAUDE.md) except the root README.
+*.md
+CLAUDE.md
+!/README.md

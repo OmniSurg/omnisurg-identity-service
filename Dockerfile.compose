@@ -1,0 +1,48 @@
+# Dockerfile.compose: built ONLY by the omnisurg-infrastructure local compose
+# stack (compose/docker-compose.services.yml). The build context is the
+# omnisurg PARENT directory so the go.mod replace directives resolve unchanged:
+#   replace ...omnisurg-go-common      => ../omnisurg-go-common
+#   replace ...omnisurg-proto/gen/go   => ../omnisurg-proto/gen/go
+# The siblings are copied into /src at the same relative layout the service
+# expects, so no go.mod edit and no GitHub publish are required.
+#
+# The existing ./Dockerfile is left untouched (it documents the future
+# GitHub-resolved CI image). Use THIS file for the local containerised stack.
+#
+# Module go directive is 1.26.4 (go.mod), so the builder pins golang:1.26-alpine.
+FROM golang:1.26-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+
+# Shared libraries first so their layers cache across every service image.
+COPY omnisurg-go-common/ ./omnisurg-go-common/
+COPY omnisurg-proto/gen/go/ ./omnisurg-proto/gen/go/
+
+# This service.
+COPY omnisurg-identity-service/ ./omnisurg-identity-service/
+
+WORKDIR /src/omnisurg-identity-service
+RUN go mod download
+
+# Build the server and the seed binary for this service.
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/seed ./cmd/seed
+
+# Build the golang-migrate CLI (postgres driver) so the entrypoint can run
+# migrations without a host toolchain. Version matches the service Makefile pin.
+RUN CGO_ENABLED=0 GOOS=linux go install -tags 'postgres' \
+    github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates wget && \
+    addgroup -S omnisurg && adduser -S omnisurg -G omnisurg
+WORKDIR /app
+COPY --from=builder /bin/server ./server
+COPY --from=builder /bin/seed ./seed
+COPY --from=builder /go/bin/migrate ./migrate
+COPY --from=builder /src/omnisurg-identity-service/migrations ./migrations
+COPY --from=builder /src/omnisurg-identity-service/docker/entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh ./migrate ./server ./seed
+USER omnisurg
+EXPOSE 8081 9081
+ENTRYPOINT ["/app/entrypoint.sh"]
