@@ -21,4 +21,12 @@ var (
 	ErrMfaAlreadyEnrolled = apperr.New("MFA_ALREADY_ENROLLED", "two factor sign in is already set up; reset it before enrolling again", http.StatusConflict)
 	ErrMfaNotEnrolled     = apperr.New("MFA_NOT_ENROLLED", "two factor sign in is not set up yet; set it up first", http.StatusConflict)
 	ErrInvalidTotpCode    = apperr.New("MFA_INVALID_CODE", "that code is not correct or has expired", http.StatusUnauthorized)
+
+	// Account activation sentinels. ErrActivationInvalid is deliberately generic
+	// and returned for every negative case (unknown token, wrong purpose,
+	// expired, already consumed, or a lost consume race) so a failed activate
+	// attempt never reveals which condition failed, mirroring the login
+	// enumeration protection (HG-B3).
+	ErrActivationInvalid    = apperr.New("AUTH_ACTIVATION_INVALID", "this activation link is not valid or has expired", http.StatusUnauthorized)
+	ErrNotPendingActivation = apperr.New("USER_NOT_PENDING_ACTIVATION", "this user is not waiting to be activated", http.StatusConflict)
 )

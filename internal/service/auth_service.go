@@ -147,7 +147,10 @@ func (s *AuthService) Login(ctx context.Context, tenantID uuid.UUID, email, pass
 	}
 	if rec.Status != "active" {
 		// Spend one bcrypt compare so an inactive user is not faster than an
-		// active one with a wrong password (HG-B3 timing oracle).
+		// active one with a wrong password (HG-B3 timing oracle). This also
+		// covers a pending_activation user: they get the exact same generic
+		// error as a bad password, never a hint that the account exists but is
+		// not yet usable.
 		dummyCompare(password)
 		return LoginResult{}, model.ErrBadCredentials
 	}
@@ -155,19 +158,7 @@ func (s *AuthService) Login(ctx context.Context, tenantID uuid.UUID, email, pass
 		return LoginResult{}, model.ErrBadCredentials
 	}
 
-	branchID := ""
-	if rec.BranchID != nil {
-		branchID = rec.BranchID.String()
-	}
-	now := time.Now().UTC()
-	token, err := ojwt.Sign(ojwt.Claims{
-		Subject:      rec.ID.String(),
-		TenantID:     tenantID.String(),
-		BranchID:     branchID,
-		Role:         rec.Role,
-		ProviderRole: rec.ProviderRole,
-		MFAVerified:  false,
-	}, s.secret, s.ttl)
+	token, expiresAt, err := s.mintSession(tenantID, rec.ID, rec.BranchID, rec.Role, rec.ProviderRole)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -190,5 +181,84 @@ func (s *AuthService) Login(ctx context.Context, tenantID uuid.UUID, email, pass
 		log.Error().Err(aerr).Str("action", "identity.login").Msg("audit emit failed")
 	}
 
-	return LoginResult{Token: token, ExpiresAt: now.Add(s.ttl), User: user}, nil
+	return LoginResult{Token: token, ExpiresAt: expiresAt, User: user}, nil
+}
+
+// mintSession signs a tenant scoped session JWT and returns its expiry
+// (computed once at signing time, so the reported expiry never drifts from
+// the token's real exp). Both Login and Activate call this SAME helper so the
+// session claims and expiry semantics never diverge between the two paths
+// that auto sign a user in.
+func (s *AuthService) mintSession(tenantID, userID uuid.UUID, branchID *uuid.UUID, role, providerRole string) (token string, expiresAt time.Time, err error) {
+	bID := ""
+	if branchID != nil {
+		bID = branchID.String()
+	}
+	now := time.Now().UTC()
+	token, err = ojwt.Sign(ojwt.Claims{
+		Subject:      userID.String(),
+		TenantID:     tenantID.String(),
+		BranchID:     bID,
+		Role:         role,
+		ProviderRole: providerRole,
+		MFAVerified:  false,
+	}, s.secret, s.ttl)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token, now.Add(s.ttl), nil
+}
+
+// Activate consumes a one time activation token, sets the caller's chosen
+// password, activates the account, and auto signs the user in exactly like
+// Login (the same mintSession claims, the same LoginResult shape). Every
+// negative case (an unknown, wrong purpose, expired, or already consumed
+// token, or a lost consume race) returns the SAME generic
+// model.ErrActivationInvalid so a failed attempt never reveals which
+// condition failed. The new password is validated up front, before the token
+// is even looked up, so a short password is rejected identically regardless
+// of whether the supplied token happens to be valid (this also lets the
+// Contract Smoke Test exercise the 422 case with no real token).
+func (s *AuthService) Activate(ctx context.Context, rawToken, newPassword, requestID string) (LoginResult, error) {
+	if len(newPassword) < 8 {
+		return LoginResult{}, model.ErrValidation.WithDetails([]map[string]string{{"field": "new_password", "issue": "must be at least 8 characters"}})
+	}
+
+	tok, err := s.store.GetCredentialTokenByHash(ctx, security.HashToken(rawToken))
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if !tok.IsUsableActivation(time.Now().UTC()) {
+		return LoginResult{}, model.ErrActivationInvalid
+	}
+
+	newHash, err := security.HashPassword(newPassword)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	user, err := s.store.ActivateWithToken(ctx, tok.TenantID, tok.ID, tok.UserID, newHash)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	token, expiresAt, err := s.mintSession(tok.TenantID, user.ID, user.BranchID, user.Role, user.ProviderRole)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	actor := user.ID
+	if aerr := s.audit.Emit(ctx, model.AuditEvent{
+		TenantID:   tok.TenantID,
+		ActorID:    &actor,
+		Action:     "identity.activate",
+		TargetType: "user",
+		TargetID:   &actor,
+		RequestID:  requestID,
+	}); aerr != nil {
+		// Audit write failure is alertable but must not block a valid activation.
+		log.Error().Err(aerr).Str("action", "identity.activate").Msg("audit emit failed")
+	}
+
+	return LoginResult{Token: token, ExpiresAt: expiresAt, User: user}, nil
 }

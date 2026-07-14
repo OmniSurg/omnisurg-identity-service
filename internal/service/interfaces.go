@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/OmniSurg/omnisurg-identity-service/internal/model"
 	"github.com/google/uuid"
@@ -23,6 +24,28 @@ type UserStore interface {
 	SetMfaEnrolled(ctx context.Context, tenantID, id uuid.UUID, enrolled bool) error
 	ClearTotp(ctx context.Context, tenantID, id uuid.UUID) error
 	AcceptTotpStep(ctx context.Context, tenantID, id uuid.UUID, step int64) (accepted bool, err error)
+
+	// ProvisionPendingAdmin creates a user in the pending_activation state plus
+	// a bound activation credential token, in ONE atomic transaction. It never
+	// accepts a caller supplied password: the repository stores a random,
+	// unusable hash so the row is valid until Activate sets a real one.
+	ProvisionPendingAdmin(ctx context.Context, tenantID uuid.UUID, in model.NewPendingUser, emailEncrypted string, phoneEncrypted []byte, passwordHash string, tokenHash []byte, expiresAt time.Time) (model.User, error)
+	// GetCredentialTokenByHash resolves a credential token by its hash with NO
+	// tenant context (credential_tokens is service-global, like crypto_keys);
+	// the pre-auth activate lookup has no app.tenant_id to scope by.
+	GetCredentialTokenByHash(ctx context.Context, hash []byte) (model.CredentialToken, error)
+	// ActivateWithToken atomically consumes the named credential token
+	// (failing closed on a lost race) and sets the user's password and status
+	// active, both under WithTenant(tenantID) so the RLS-scoped user write and
+	// the token consume are one transaction.
+	ActivateWithToken(ctx context.Context, tenantID, tokenID, userID uuid.UUID, passwordHash string) (model.User, error)
+	// InvalidateActivationTokens marks every outstanding (unconsumed)
+	// activation token for the user consumed, used before ResendActivation
+	// issues a fresh one.
+	InvalidateActivationTokens(ctx context.Context, tenantID, userID uuid.UUID) error
+	// InsertActivationToken stores a fresh activation token for an already
+	// existing pending user, used by ResendActivation.
+	InsertActivationToken(ctx context.Context, tenantID, userID uuid.UUID, tokenHash []byte, expiresAt time.Time) (model.CredentialToken, error)
 }
 
 // AuditEmitter records audit events. repository.AuditRepository satisfies it.

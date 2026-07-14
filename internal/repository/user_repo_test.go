@@ -195,6 +195,104 @@ func TestGetReturnsErrorWhenEmailUndecryptable(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestCountProviderSuperAdmins(t *testing.T) {
+	repo, kr := setup(t)
+	ctx := context.Background()
+
+	// Empty platform tenant: no operators yet.
+	count, err := repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+
+	// One provider super-admin under the platform tenant.
+	hash, err := security.HashPassword("password123")
+	require.NoError(t, err)
+	enc, err := kr.Cipher().Encrypt([]byte("operator@omnisurg.test"))
+	require.NoError(t, err)
+	op, err := repo.Create(ctx, model.PlatformTenantID, model.NewUser{
+		TenantID:     model.PlatformTenantID,
+		Email:        "operator@omnisurg.test",
+		DisplayName:  "Operator",
+		ProviderRole: model.RoleProviderSuperAdmin,
+	}, string(enc), hash)
+	require.NoError(t, err)
+
+	count, err = repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	// A tenant user with a normal role under a real tenant is not counted.
+	mustCreate(t, repo, kr, tenantA, "reception@acme.test", model.RoleReception)
+	count, err = repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	// A soft-deleted provider super-admin drops out of the count.
+	require.NoError(t, repo.SoftDelete(ctx, model.PlatformTenantID, op.ID))
+	count, err = repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+}
+
+func TestCreateEnrolledProviderOperator(t *testing.T) {
+	repo, kr := setup(t)
+	ctx := context.Background()
+
+	enc, err := kr.Cipher().Encrypt([]byte("atomic@omnisurg.test"))
+	require.NoError(t, err)
+	hash, err := security.HashPassword("password123456")
+	require.NoError(t, err)
+	secret, _, err := security.GenerateSecret("atomic@omnisurg.test")
+	require.NoError(t, err)
+
+	user, err := repo.CreateEnrolledProviderOperator(ctx, model.PlatformTenantID, model.NewUser{
+		TenantID:     model.PlatformTenantID,
+		Email:        "atomic@omnisurg.test",
+		DisplayName:  "Atomic Operator",
+		ProviderRole: model.RoleProviderSuperAdmin,
+	}, string(enc), hash, secret)
+	require.NoError(t, err)
+	assert.Equal(t, model.RoleProviderSuperAdmin, user.ProviderRole)
+	assert.Empty(t, user.Role)
+	assert.True(t, user.MFAEnrolled, "the returned domain view reflects the enrolled flip")
+
+	// The row persists complete: exactly one provider super-admin, enrolled, with
+	// a secret that round-trips. If any step of the atomic write had failed the
+	// whole insert would have rolled back, so none of these can be half-set.
+	count, err := repo.CountProviderSuperAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	got, err := repo.Get(ctx, model.PlatformTenantID, user.ID)
+	require.NoError(t, err)
+	assert.True(t, got.MFAEnrolled)
+
+	stored, enrolled, err := repo.GetTotpSecret(ctx, model.PlatformTenantID, user.ID)
+	require.NoError(t, err)
+	assert.True(t, enrolled)
+	assert.Equal(t, secret, stored)
+}
+
+func TestCreateEnrolledProviderOperatorRejectsBothRoles(t *testing.T) {
+	repo, kr := setup(t)
+	ctx := context.Background()
+	enc, err := kr.Cipher().Encrypt([]byte("mixed.atomic@omnisurg.test"))
+	require.NoError(t, err)
+	hash, err := security.HashPassword("password123456")
+	require.NoError(t, err)
+	secret, _, err := security.GenerateSecret("mixed.atomic@omnisurg.test")
+	require.NoError(t, err)
+
+	_, err = repo.CreateEnrolledProviderOperator(ctx, model.PlatformTenantID, model.NewUser{
+		TenantID:     model.PlatformTenantID,
+		Email:        "mixed.atomic@omnisurg.test",
+		DisplayName:  "Mixed",
+		Role:         model.RolePracticeAdmin,
+		ProviderRole: model.RoleProviderSuperAdmin,
+	}, string(enc), hash, secret)
+	assert.ErrorIs(t, err, model.ErrValidation)
+}
+
 func TestUpdateAndSoftDelete(t *testing.T) {
 	repo, kr := setup(t)
 	u := mustCreate(t, repo, kr, tenantA, "edit@acme.test", model.RoleReception)

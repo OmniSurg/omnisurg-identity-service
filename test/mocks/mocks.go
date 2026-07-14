@@ -3,8 +3,10 @@
 package mocks
 
 import (
+	"bytes"
 	"context"
 	"sync"
+	"time"
 
 	"github.com/OmniSurg/omnisurg-identity-service/internal/model"
 	"github.com/OmniSurg/omnisurg-identity-service/internal/repository"
@@ -13,10 +15,20 @@ import (
 
 // InMemoryUserStore implements service.UserStore.
 type InMemoryUserStore struct {
-	mu    sync.Mutex
-	Users map[uuid.UUID]model.User
-	Auth  map[string]model.AuthRecord // keyed by emailHash
-	Totp  map[uuid.UUID]TotpState     // keyed by user id
+	mu     sync.Mutex
+	Users  map[uuid.UUID]model.User
+	Auth   map[string]model.AuthRecord // keyed by emailHash
+	Totp   map[uuid.UUID]TotpState     // keyed by user id
+	Tokens []PendingToken
+}
+
+// PendingToken is an in memory credential_tokens row. The field is exported
+// so a test can seed one directly (mirroring how Auth and Users are seeded
+// directly for Login tests), since provisioning is a gRPC-only path with no
+// REST surface for an HTTP layer test to drive.
+type PendingToken struct {
+	Token model.CredentialToken
+	Hash  []byte
 }
 
 // TotpState is the in memory two factor record for a user.
@@ -96,6 +108,98 @@ func (m *InMemoryUserStore) SoftDelete(ctx context.Context, tenantID, id uuid.UU
 	m.Users[id] = u
 	return nil
 }
+
+// ProvisionPendingAdmin mirrors Create but produces a pending_activation user
+// and records a bound token entry in Tokens. It does not populate Auth (Login
+// tests seed Auth directly, exactly like the Create path already does), so
+// tests that need an activate-then-login round trip seed Auth explicitly.
+func (m *InMemoryUserStore) ProvisionPendingAdmin(ctx context.Context, tenantID uuid.UUID, in model.NewPendingUser, emailEncrypted string, phoneEncrypted []byte, passwordHash string, tokenHash []byte, expiresAt time.Time) (model.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, u := range m.Users {
+		if u.TenantID == tenantID && u.Email == in.Email {
+			return model.User{}, model.ErrEmailTaken
+		}
+	}
+	id := uuid.New()
+	u := model.User{ID: id, TenantID: tenantID, BranchID: in.BranchID, Email: in.Email, DisplayName: in.DisplayName, Role: in.Role, Status: "pending_activation"}
+	m.Users[id] = u
+	m.Tokens = append(m.Tokens, PendingToken{
+		Token: model.CredentialToken{ID: uuid.New(), TenantID: tenantID, UserID: id, Purpose: model.CredentialTokenPurposeActivation, ExpiresAt: expiresAt},
+		Hash:  tokenHash,
+	})
+	return u, nil
+}
+
+// GetCredentialTokenByHash resolves a token by hash with no tenant filter,
+// mirroring the service-global posture of the real repository.
+func (m *InMemoryUserStore) GetCredentialTokenByHash(ctx context.Context, hash []byte) (model.CredentialToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, pt := range m.Tokens {
+		if bytes.Equal(pt.Hash, hash) {
+			return pt.Token, nil
+		}
+	}
+	return model.CredentialToken{}, model.ErrActivationInvalid
+}
+
+// ActivateWithToken mirrors the atomic repository behaviour: a single-shot
+// consume plus a password and status write, both or neither.
+func (m *InMemoryUserStore) ActivateWithToken(ctx context.Context, tenantID, tokenID, userID uuid.UUID, passwordHash string) (model.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idx := -1
+	for i, pt := range m.Tokens {
+		if pt.Token.ID == tokenID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 || m.Tokens[idx].Token.ConsumedAt != nil || m.Tokens[idx].Token.TenantID != tenantID {
+		return model.User{}, model.ErrActivationInvalid
+	}
+	u, ok := m.Users[userID]
+	if !ok || u.TenantID != tenantID {
+		return model.User{}, model.ErrActivationInvalid
+	}
+	now := time.Now().UTC()
+	m.Tokens[idx].Token.ConsumedAt = &now
+	u.Status = "active"
+	m.Users[userID] = u
+	for hash, rec := range m.Auth {
+		if rec.ID == userID {
+			rec.PasswordHash = passwordHash
+			rec.Status = "active"
+			m.Auth[hash] = rec
+		}
+	}
+	return u, nil
+}
+
+// InvalidateActivationTokens marks every outstanding activation token for the
+// user consumed.
+func (m *InMemoryUserStore) InvalidateActivationTokens(ctx context.Context, tenantID, userID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC()
+	for i, pt := range m.Tokens {
+		if pt.Token.UserID == userID && pt.Token.TenantID == tenantID && pt.Token.ConsumedAt == nil {
+			m.Tokens[i].Token.ConsumedAt = &now
+		}
+	}
+	return nil
+}
+
+// InsertActivationToken stores a fresh token entry for an existing user.
+func (m *InMemoryUserStore) InsertActivationToken(ctx context.Context, tenantID, userID uuid.UUID, tokenHash []byte, expiresAt time.Time) (model.CredentialToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tok := model.CredentialToken{ID: uuid.New(), TenantID: tenantID, UserID: userID, Purpose: model.CredentialTokenPurposeActivation, ExpiresAt: expiresAt}
+	m.Tokens = append(m.Tokens, PendingToken{Token: tok, Hash: tokenHash})
+	return tok, nil
+}
+
 func (m *InMemoryUserStore) AuthByEmailHash(ctx context.Context, tenantID uuid.UUID, hash string) (model.AuthRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

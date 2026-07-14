@@ -82,6 +82,7 @@ func main() {
 
 	r.testHealth()
 	r.testLogin()
+	r.testActivateNegatives()
 	r.testProviderLogin()
 	r.testProviderTotp()
 	r.testMe()
@@ -271,6 +272,25 @@ func (r *runner) testLogin() {
 	r.record("POST /login x-fr validation -> 422", code3 == 422 && bodyHas(b3, "VALIDATION_FAILED"), statusStr(code3))
 	// audit emission
 	r.record("POST /login x-nfr audit identity.login", r.auditCount("identity.login") >= 1, "audit row present")
+}
+
+// testActivateNegatives exercises the public account activation endpoint's
+// NEGATIVE cases only. Provisioning a real pending user and its activation
+// token is a gRPC-only operation (there is no REST surface for it), so this
+// standalone curl-only runner cannot mint a valid token; the activate HAPPY
+// path is proven end to end in the admin-bff cross-service smoke, which CAN
+// provision via gRPC. Both negatives below are checked BEFORE any token
+// lookup (the password shape is validated first), so a garbage token string
+// exercises them deterministically.
+func (r *runner) testActivateNegatives() {
+	code, b := r.postNoTenant("/activate", []byte(`{"token":"totally-unknown-token-value","new_password":"GoodPassword1!"}`))
+	r.record("POST /activate x-fr unknown token -> 401 AUTH_ACTIVATION_INVALID", code == 401 && bodyHas(b, "AUTH_ACTIVATION_INVALID"), statusStr(code))
+
+	code2, b2 := r.postNoTenant("/activate", []byte(`{"token":"totally-unknown-token-value","new_password":"short"}`))
+	r.record("POST /activate x-fr short password -> 422 VALIDATION_FAILED", code2 == 422 && bodyHas(b2, "VALIDATION_FAILED"), statusStr(code2))
+
+	code3, b3 := r.postNoTenant("/activate", []byte(`{"token":"totally-unknown-token-value"}`))
+	r.record("POST /activate x-fr missing new_password -> 422 VALIDATION_FAILED", code3 == 422 && bodyHas(b3, "VALIDATION_FAILED"), statusStr(code3))
 }
 
 // testProviderLogin exercises the public provider (platform) login. It takes no
