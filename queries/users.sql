@@ -99,3 +99,32 @@ UPDATE users
 SET status = 'deleted', updated_at = now()
 WHERE id = $1 AND status <> 'deleted'
 RETURNING id;
+
+-- name: InsertPendingUser :one
+-- Creates a user in the pending_activation state with an unusable random
+-- password hash (the caller supplies an already hashed random value) and an
+-- encrypted phone (the activation SMS recipient). The user cannot log in
+-- until Activate consumes the bound credential token and sets a real
+-- password. Kept separate from CreateUser, which must keep producing active
+-- users for backward compatibility.
+INSERT INTO users (
+    tenant_id, branch_id, email_encrypted, email_hash, password_hash,
+    phone_encrypted, display_name, role, provider_role, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending_activation')
+RETURNING id, tenant_id, branch_id, email_encrypted, display_name, role,
+    provider_role, status, mfa_enrolled, created_at, updated_at;
+
+-- name: SetPasswordAndActivate :one
+-- Sets the real password hash and activates a pending user. Scoped by RLS
+-- (the caller runs this under WithTenant(tenant_id) resolved from the
+-- credential token); the row must be visible under that tenant scope or
+-- pgx.ErrNoRows is returned. The status = 'pending_activation' predicate is a
+-- second, independent guard against resurrecting a soft-deleted (or already
+-- active) user through a still-live activation token: a row that is not
+-- pending matches nothing here and the caller must fail closed with the
+-- generic activation-invalid error, never a distinguishable one.
+UPDATE users
+SET password_hash = $2, status = 'active', updated_at = now()
+WHERE id = $1 AND status = 'pending_activation'
+RETURNING id, tenant_id, branch_id, email_encrypted, display_name, role,
+    provider_role, status, mfa_enrolled, created_at, updated_at;

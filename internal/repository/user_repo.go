@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	pg "github.com/OmniSurg/omnisurg-go-common/postgres"
 	"github.com/OmniSurg/omnisurg-identity-service/internal/db"
@@ -17,15 +18,22 @@ import (
 
 // UserRepository wraps the sqlc generated queries with tenant context (via
 // postgres.WithTenant), error mapping, and domain conversion. It decrypts email
-// for the domain view using the keyring.
+// for the domain view using the keyring. tokens composes the standalone
+// credential token operations (insert, invalidate, the service-global hash
+// lookup) over the SAME pool; the two atomic operations that must run as ONE
+// transaction spanning both the users and credential_tokens tables
+// (ProvisionPendingAdmin, ActivateWithToken) are implemented directly on
+// UserRepository below instead, since tokens' own methods each open their own
+// WithTenant scope and cannot be composed into a single transaction.
 type UserRepository struct {
 	pool    *pgxpool.Pool
 	keyring *security.Keyring
+	tokens  *CredentialTokenRepo
 }
 
 // NewUserRepository builds a UserRepository.
 func NewUserRepository(pool *pgxpool.Pool, keyring *security.Keyring) *UserRepository {
-	return &UserRepository{pool: pool, keyring: keyring}
+	return &UserRepository{pool: pool, keyring: keyring, tokens: NewCredentialTokenRepo(pool)}
 }
 
 // Create inserts a user. emailEncrypted is the AES-256-GCM ciphertext as a
@@ -303,15 +311,36 @@ func (r *UserRepository) Update(ctx context.Context, tenantID, id uuid.UUID, upd
 	return out, nil
 }
 
-// SoftDelete sets status to deleted.
+// SoftDelete sets status to deleted and, in the SAME transaction, invalidates
+// every outstanding activation token for the user (reusing
+// InvalidateActivationTokensForUser, the same query the resend flow uses).
+// This closes the resurrection gap where a still-live activation link could
+// otherwise reach a deleted pending user: the token is revoked at the moment
+// of deletion, not left to be caught only by the status guard in
+// SetPasswordAndActivate. Both writes commit together or neither does.
 func (r *UserRepository) SoftDelete(ctx context.Context, tenantID, id uuid.UUID) error {
 	return pg.WithTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pg.Conn) error {
-		_, qerr := db.New(conn).SoftDeleteUser(ctx, pgUUID(id))
+		tx, berr := conn.Begin(ctx)
+		if berr != nil {
+			return fmt.Errorf("begin tx: %w", berr)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		q := db.New(tx)
+
+		_, qerr := q.SoftDeleteUser(ctx, pgUUID(id))
 		if errors.Is(qerr, pgx.ErrNoRows) {
 			return model.ErrUserNotFound
 		}
 		if qerr != nil {
 			return fmt.Errorf("soft delete user: %w", qerr)
+		}
+
+		if terr := q.InvalidateActivationTokensForUser(ctx, pgUUID(id)); terr != nil {
+			return fmt.Errorf("invalidate activation tokens on delete: %w", terr)
+		}
+
+		if cerr := tx.Commit(ctx); cerr != nil {
+			return fmt.Errorf("commit: %w", cerr)
 		}
 		return nil
 	})
@@ -448,6 +477,163 @@ func (r *UserRepository) AcceptTotpStep(ctx context.Context, tenantID, id uuid.U
 		return false, err
 	}
 	return accepted, nil
+}
+
+// ProvisionPendingAdmin inserts a user in the pending_activation state plus a
+// bound activation credential token, in ONE transaction (mirroring
+// payment-service's atomic RecordPayment): a crash or error between the two
+// writes leaves neither behind, so a pending user is never created without an
+// activation path, and a token is never created without an owning user.
+// passwordHash is an already-hashed random, unusable value (the caller never
+// accepts an operator-supplied password here); tokenHash is the sha256 of the
+// activation token the caller generated and will return to the operator
+// exactly once.
+func (r *UserRepository) ProvisionPendingAdmin(ctx context.Context, tenantID uuid.UUID, in model.NewPendingUser, emailEncrypted string, phoneEncrypted []byte, passwordHash string, tokenHash []byte, expiresAt time.Time) (model.User, error) {
+	var out model.User
+	err := pg.WithTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pg.Conn) error {
+		tx, berr := conn.Begin(ctx)
+		if berr != nil {
+			return fmt.Errorf("begin tx: %w", berr)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		q := db.New(tx)
+
+		row, qerr := q.InsertPendingUser(ctx, db.InsertPendingUserParams{
+			TenantID:       pgUUID(tenantID),
+			BranchID:       pgUUIDPtr(in.BranchID),
+			EmailEncrypted: []byte(emailEncrypted),
+			EmailHash:      r.keyring.EmailBlindIndex(in.Email),
+			PasswordHash:   passwordHash,
+			PhoneEncrypted: phoneEncrypted,
+			DisplayName:    in.DisplayName,
+			Role:           in.Role,
+			ProviderRole:   "",
+		})
+		if qerr != nil {
+			if isUniqueViolation(qerr) {
+				return model.ErrEmailTaken
+			}
+			return fmt.Errorf("insert pending user: %w", qerr)
+		}
+
+		if _, terr := q.InsertCredentialToken(ctx, db.InsertCredentialTokenParams{
+			TenantID:  pgUUID(tenantID),
+			UserID:    row.ID,
+			Purpose:   model.CredentialTokenPurposeActivation,
+			TokenHash: tokenHash,
+			ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+		}); terr != nil {
+			return fmt.Errorf("insert credential token: %w", terr)
+		}
+
+		u, derr := r.toDomain(userRow{
+			ID:             row.ID,
+			TenantID:       row.TenantID,
+			BranchID:       row.BranchID,
+			EmailEncrypted: row.EmailEncrypted,
+			DisplayName:    row.DisplayName,
+			Role:           row.Role,
+			ProviderRole:   row.ProviderRole,
+			Status:         row.Status,
+			MfaEnrolled:    row.MfaEnrolled,
+			CreatedAt:      row.CreatedAt,
+			UpdatedAt:      row.UpdatedAt,
+		})
+		if derr != nil {
+			return derr
+		}
+		if cerr := tx.Commit(ctx); cerr != nil {
+			return fmt.Errorf("commit: %w", cerr)
+		}
+		out = u
+		return nil
+	})
+	if err != nil {
+		return model.User{}, err
+	}
+	return out, nil
+}
+
+// ActivateWithToken atomically consumes the named credential token (claim
+// first, execute second, mirroring payment-service's RecordPayment) and, only
+// if the claim succeeded, sets the user's password and activates it, in ONE
+// transaction under WithTenant(tenantID). A lost race (the token was already
+// consumed by a concurrent call) fails the whole transaction closed with
+// model.ErrActivationInvalid: neither the token nor the user is left
+// partially mutated.
+func (r *UserRepository) ActivateWithToken(ctx context.Context, tenantID, tokenID, userID uuid.UUID, passwordHash string) (model.User, error) {
+	var out model.User
+	err := pg.WithTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pg.Conn) error {
+		tx, berr := conn.Begin(ctx)
+		if berr != nil {
+			return fmt.Errorf("begin tx: %w", berr)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		q := db.New(tx)
+
+		if _, cerr := q.ConsumeCredentialToken(ctx, pgUUID(tokenID)); cerr != nil {
+			if errors.Is(cerr, pgx.ErrNoRows) {
+				return model.ErrActivationInvalid
+			}
+			return fmt.Errorf("consume credential token: %w", cerr)
+		}
+
+		row, uerr := q.SetPasswordAndActivate(ctx, db.SetPasswordAndActivateParams{
+			ID:           pgUUID(userID),
+			PasswordHash: passwordHash,
+		})
+		if errors.Is(uerr, pgx.ErrNoRows) {
+			return model.ErrActivationInvalid
+		}
+		if uerr != nil {
+			return fmt.Errorf("set password and activate: %w", uerr)
+		}
+
+		u, derr := r.toDomain(userRow{
+			ID:             row.ID,
+			TenantID:       row.TenantID,
+			BranchID:       row.BranchID,
+			EmailEncrypted: row.EmailEncrypted,
+			DisplayName:    row.DisplayName,
+			Role:           row.Role,
+			ProviderRole:   row.ProviderRole,
+			Status:         row.Status,
+			MfaEnrolled:    row.MfaEnrolled,
+			CreatedAt:      row.CreatedAt,
+			UpdatedAt:      row.UpdatedAt,
+		})
+		if derr != nil {
+			return derr
+		}
+		if cerr := tx.Commit(ctx); cerr != nil {
+			return fmt.Errorf("commit: %w", cerr)
+		}
+		out = u
+		return nil
+	})
+	if err != nil {
+		return model.User{}, err
+	}
+	return out, nil
+}
+
+// GetCredentialTokenByHash delegates to the composed CredentialTokenRepo: a
+// service-global, pre-auth lookup on the bare pool with no tenant context.
+func (r *UserRepository) GetCredentialTokenByHash(ctx context.Context, hash []byte) (model.CredentialToken, error) {
+	return r.tokens.GetByHash(ctx, hash)
+}
+
+// InvalidateActivationTokens marks every outstanding activation token for the
+// user consumed, used before ResendActivation issues a fresh one.
+func (r *UserRepository) InvalidateActivationTokens(ctx context.Context, tenantID, userID uuid.UUID) error {
+	return r.tokens.InvalidateForUser(ctx, tenantID, userID)
+}
+
+// InsertActivationToken stores a fresh activation token for an already
+// existing pending user, used by ResendActivation (which does not create a
+// user, so it does not need ProvisionPendingAdmin's combined transaction).
+func (r *UserRepository) InsertActivationToken(ctx context.Context, tenantID, userID uuid.UUID, tokenHash []byte, expiresAt time.Time) (model.CredentialToken, error) {
+	return r.tokens.Insert(ctx, tenantID, userID, tokenHash, model.CredentialTokenPurposeActivation, expiresAt)
 }
 
 // userRow is the common projection the user read queries return. The sqlc

@@ -125,6 +125,28 @@ func (h *Handler) ProviderLogin(c *gin.Context) {
 	})
 }
 
+// Activate is public and pre auth, like Login and ProviderLogin: it consumes
+// a one time activation token, sets the caller's chosen password, activates
+// the account, and mints a session (auto sign in), returning the SAME shape
+// Login returns.
+func (h *Handler) Activate(c *gin.Context) {
+	var req api.ActivateRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Token == "" || req.NewPassword == "" {
+		respondError(c, model.ErrValidation.WithDetails([]map[string]string{{"field": "body", "issue": "token and new_password are required"}}))
+		return
+	}
+	res, err := h.auth.Activate(c.Request.Context(), req.Token, req.NewPassword, c.GetString(mw.RequestIDKey))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	respondSuccess(c, http.StatusOK, gin.H{
+		"token":      res.Token,
+		"expires_at": res.ExpiresAt,
+		"user":       presentUser(res.User),
+	})
+}
+
 type totpCodeRequest struct {
 	Code string `json:"code"`
 }

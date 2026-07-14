@@ -29,6 +29,11 @@ type Querier interface {
 	// accepted step is nulled too so a fresh re-enrolment starts with clean replay
 	// state (a reset resets all TOTP state, not just the secret).
 	ClearTotp(ctx context.Context, id pgtype.UUID) error
+	// Single-shot conditional consume: the row updates only when consumed_at is
+	// still null, so a replayed activate call (or a lost race with a concurrent
+	// one) matches no row and returns pgx.ErrNoRows rather than silently
+	// succeeding twice.
+	ConsumeCredentialToken(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
 	// Counts live provider super-admins under the caller tenant (the platform
 	// tenant, set by WithTenant). Used by the operator bootstrap to stay a safe
 	// one-shot: it refuses to create a second operator once one exists.
@@ -37,6 +42,11 @@ type Querier interface {
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	// queries/keys.sql
 	GetActiveDEK(ctx context.Context) ([]byte, error)
+	// Resolves a token by its unique hash with NO tenant filter: credential_tokens
+	// carries no RLS policy, so this is a genuine service-global, pre-auth lookup
+	// (the same posture as GetActiveDEK on crypto_keys). Isolation is the token's
+	// 256-bit entropy, not a WHERE clause.
+	GetCredentialTokenByHash(ctx context.Context, tokenHash []byte) (GetCredentialTokenByHashRow, error)
 	// queries/idempotency.sql
 	GetIdempotentResponse(ctx context.Context, arg GetIdempotentResponseParams) (GetIdempotentResponseRow, error)
 	// Reads the encrypted TOTP secret and mfa_enrolled for a user by id, under RLS.
@@ -45,12 +55,36 @@ type Querier interface {
 	GetUser(ctx context.Context, id pgtype.UUID) (GetUserRow, error)
 	// queries/audit.sql
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
+	// queries/credential_tokens.sql
+	// credential_tokens is service-global (no RLS); this write still runs inside
+	// WithTenant so it shares connection lifecycle discipline with the sibling
+	// user writes, though the GUC has no bearing on this table's visibility.
+	InsertCredentialToken(ctx context.Context, arg InsertCredentialTokenParams) (InsertCredentialTokenRow, error)
 	InsertDEK(ctx context.Context, wrappedDek []byte) (pgtype.UUID, error)
+	// Creates a user in the pending_activation state with an unusable random
+	// password hash (the caller supplies an already hashed random value) and an
+	// encrypted phone (the activation SMS recipient). The user cannot log in
+	// until Activate consumes the bound credential token and sets a real
+	// password. Kept separate from CreateUser, which must keep producing active
+	// users for backward compatibility.
+	InsertPendingUser(ctx context.Context, arg InsertPendingUserParams) (InsertPendingUserRow, error)
+	// Marks every outstanding (unconsumed) activation token for the user
+	// consumed, so a fresh resend cannot be joined by a still-live prior link.
+	InvalidateActivationTokensForUser(ctx context.Context, userID pgtype.UUID) error
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
 	QueryAuditLog(ctx context.Context, arg QueryAuditLogParams) ([]AuditLog, error)
 	SaveIdempotentResponse(ctx context.Context, arg SaveIdempotentResponseParams) error
 	// Flips mfa_enrolled, called on a confirmed enrolment.
 	SetMfaEnrolled(ctx context.Context, arg SetMfaEnrolledParams) error
+	// Sets the real password hash and activates a pending user. Scoped by RLS
+	// (the caller runs this under WithTenant(tenant_id) resolved from the
+	// credential token); the row must be visible under that tenant scope or
+	// pgx.ErrNoRows is returned. The status = 'pending_activation' predicate is a
+	// second, independent guard against resurrecting a soft-deleted (or already
+	// active) user through a still-live activation token: a row that is not
+	// pending matches nothing here and the caller must fail closed with the
+	// generic activation-invalid error, never a distinguishable one.
+	SetPasswordAndActivate(ctx context.Context, arg SetPasswordAndActivateParams) (SetPasswordAndActivateRow, error)
 	// Stores the encrypted TOTP secret. It does NOT flip mfa_enrolled: enrolment
 	// only completes once the user confirms a code, which calls SetMfaEnrolled.
 	SetTotpSecret(ctx context.Context, arg SetTotpSecretParams) error

@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -19,11 +20,18 @@ const secret = "unit-test-secret"
 
 var tenantA = uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
+// pendingToken is a hand written in memory credential_tokens row.
+type pendingToken struct {
+	token model.CredentialToken
+	hash  []byte
+}
+
 // mockStore is a hand written in memory UserStore.
 type mockStore struct {
 	users     map[uuid.UUID]model.User
 	auth      map[string]model.AuthRecord // keyed by emailHash
 	totp      map[uuid.UUID]totpState     // keyed by user id
+	tokens    []pendingToken
 	createErr error
 }
 
@@ -95,6 +103,87 @@ func (m *mockStore) AuthByEmailHash(ctx context.Context, tenantID uuid.UUID, has
 		return model.AuthRecord{}, model.ErrUserNotFound
 	}
 	return rec, nil
+}
+
+// ProvisionPendingAdmin mirrors Create but produces a pending_activation user
+// and records a bound token entry in tokens. It does not populate auth (Login
+// tests seed auth directly), so an activate-then-login round trip test seeds
+// auth explicitly, exactly like the Create path already requires.
+func (m *mockStore) ProvisionPendingAdmin(ctx context.Context, tenantID uuid.UUID, in model.NewPendingUser, emailEncrypted string, phoneEncrypted []byte, passwordHash string, tokenHash []byte, expiresAt time.Time) (model.User, error) {
+	for _, u := range m.users {
+		if u.TenantID == tenantID && u.Email == in.Email {
+			return model.User{}, model.ErrEmailTaken
+		}
+	}
+	id := uuid.New()
+	u := model.User{ID: id, TenantID: tenantID, BranchID: in.BranchID, Email: in.Email, DisplayName: in.DisplayName, Role: in.Role, Status: "pending_activation"}
+	m.users[id] = u
+	m.tokens = append(m.tokens, pendingToken{
+		token: model.CredentialToken{ID: uuid.New(), TenantID: tenantID, UserID: id, Purpose: model.CredentialTokenPurposeActivation, ExpiresAt: expiresAt},
+		hash:  tokenHash,
+	})
+	return u, nil
+}
+
+// GetCredentialTokenByHash resolves a token by hash with no tenant filter,
+// mirroring the service-global posture of the real repository.
+func (m *mockStore) GetCredentialTokenByHash(ctx context.Context, hash []byte) (model.CredentialToken, error) {
+	for _, pt := range m.tokens {
+		if bytes.Equal(pt.hash, hash) {
+			return pt.token, nil
+		}
+	}
+	return model.CredentialToken{}, model.ErrActivationInvalid
+}
+
+// ActivateWithToken mirrors the atomic repository behaviour: a single-shot
+// consume plus a password and status write, both or neither.
+func (m *mockStore) ActivateWithToken(ctx context.Context, tenantID, tokenID, userID uuid.UUID, passwordHash string) (model.User, error) {
+	idx := -1
+	for i, pt := range m.tokens {
+		if pt.token.ID == tokenID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 || m.tokens[idx].token.ConsumedAt != nil || m.tokens[idx].token.TenantID != tenantID {
+		return model.User{}, model.ErrActivationInvalid
+	}
+	u, ok := m.users[userID]
+	if !ok || u.TenantID != tenantID {
+		return model.User{}, model.ErrActivationInvalid
+	}
+	now := time.Now().UTC()
+	m.tokens[idx].token.ConsumedAt = &now
+	u.Status = "active"
+	m.users[userID] = u
+	for hash, rec := range m.auth {
+		if rec.ID == userID {
+			rec.PasswordHash = passwordHash
+			rec.Status = "active"
+			m.auth[hash] = rec
+		}
+	}
+	return u, nil
+}
+
+// InvalidateActivationTokens marks every outstanding activation token for the
+// user consumed.
+func (m *mockStore) InvalidateActivationTokens(ctx context.Context, tenantID, userID uuid.UUID) error {
+	now := time.Now().UTC()
+	for i, pt := range m.tokens {
+		if pt.token.UserID == userID && pt.token.TenantID == tenantID && pt.token.ConsumedAt == nil {
+			m.tokens[i].token.ConsumedAt = &now
+		}
+	}
+	return nil
+}
+
+// InsertActivationToken stores a fresh token entry for an existing user.
+func (m *mockStore) InsertActivationToken(ctx context.Context, tenantID, userID uuid.UUID, tokenHash []byte, expiresAt time.Time) (model.CredentialToken, error) {
+	tok := model.CredentialToken{ID: uuid.New(), TenantID: tenantID, UserID: userID, Purpose: model.CredentialTokenPurposeActivation, ExpiresAt: expiresAt}
+	m.tokens = append(m.tokens, pendingToken{token: tok, hash: tokenHash})
+	return tok, nil
 }
 
 // markEnrolled flips MfaEnrolled on the auth record and user with the given id,

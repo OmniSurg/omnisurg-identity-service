@@ -242,6 +242,76 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (GetUserRow, erro
 	return i, err
 }
 
+const insertPendingUser = `-- name: InsertPendingUser :one
+INSERT INTO users (
+    tenant_id, branch_id, email_encrypted, email_hash, password_hash,
+    phone_encrypted, display_name, role, provider_role, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending_activation')
+RETURNING id, tenant_id, branch_id, email_encrypted, display_name, role,
+    provider_role, status, mfa_enrolled, created_at, updated_at
+`
+
+type InsertPendingUserParams struct {
+	TenantID       pgtype.UUID
+	BranchID       pgtype.UUID
+	EmailEncrypted []byte
+	EmailHash      string
+	PasswordHash   string
+	PhoneEncrypted []byte
+	DisplayName    string
+	Role           string
+	ProviderRole   string
+}
+
+type InsertPendingUserRow struct {
+	ID             pgtype.UUID
+	TenantID       pgtype.UUID
+	BranchID       pgtype.UUID
+	EmailEncrypted []byte
+	DisplayName    string
+	Role           string
+	ProviderRole   string
+	Status         string
+	MfaEnrolled    bool
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+}
+
+// Creates a user in the pending_activation state with an unusable random
+// password hash (the caller supplies an already hashed random value) and an
+// encrypted phone (the activation SMS recipient). The user cannot log in
+// until Activate consumes the bound credential token and sets a real
+// password. Kept separate from CreateUser, which must keep producing active
+// users for backward compatibility.
+func (q *Queries) InsertPendingUser(ctx context.Context, arg InsertPendingUserParams) (InsertPendingUserRow, error) {
+	row := q.db.QueryRow(ctx, insertPendingUser,
+		arg.TenantID,
+		arg.BranchID,
+		arg.EmailEncrypted,
+		arg.EmailHash,
+		arg.PasswordHash,
+		arg.PhoneEncrypted,
+		arg.DisplayName,
+		arg.Role,
+		arg.ProviderRole,
+	)
+	var i InsertPendingUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.BranchID,
+		&i.EmailEncrypted,
+		&i.DisplayName,
+		&i.Role,
+		&i.ProviderRole,
+		&i.Status,
+		&i.MfaEnrolled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, tenant_id, branch_id, email_encrypted, display_name, role,
     provider_role, status, mfa_enrolled, created_at, updated_at
@@ -316,6 +386,60 @@ type SetMfaEnrolledParams struct {
 func (q *Queries) SetMfaEnrolled(ctx context.Context, arg SetMfaEnrolledParams) error {
 	_, err := q.db.Exec(ctx, setMfaEnrolled, arg.ID, arg.MfaEnrolled)
 	return err
+}
+
+const setPasswordAndActivate = `-- name: SetPasswordAndActivate :one
+UPDATE users
+SET password_hash = $2, status = 'active', updated_at = now()
+WHERE id = $1 AND status = 'pending_activation'
+RETURNING id, tenant_id, branch_id, email_encrypted, display_name, role,
+    provider_role, status, mfa_enrolled, created_at, updated_at
+`
+
+type SetPasswordAndActivateParams struct {
+	ID           pgtype.UUID
+	PasswordHash string
+}
+
+type SetPasswordAndActivateRow struct {
+	ID             pgtype.UUID
+	TenantID       pgtype.UUID
+	BranchID       pgtype.UUID
+	EmailEncrypted []byte
+	DisplayName    string
+	Role           string
+	ProviderRole   string
+	Status         string
+	MfaEnrolled    bool
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+}
+
+// Sets the real password hash and activates a pending user. Scoped by RLS
+// (the caller runs this under WithTenant(tenant_id) resolved from the
+// credential token); the row must be visible under that tenant scope or
+// pgx.ErrNoRows is returned. The status = 'pending_activation' predicate is a
+// second, independent guard against resurrecting a soft-deleted (or already
+// active) user through a still-live activation token: a row that is not
+// pending matches nothing here and the caller must fail closed with the
+// generic activation-invalid error, never a distinguishable one.
+func (q *Queries) SetPasswordAndActivate(ctx context.Context, arg SetPasswordAndActivateParams) (SetPasswordAndActivateRow, error) {
+	row := q.db.QueryRow(ctx, setPasswordAndActivate, arg.ID, arg.PasswordHash)
+	var i SetPasswordAndActivateRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.BranchID,
+		&i.EmailEncrypted,
+		&i.DisplayName,
+		&i.Role,
+		&i.ProviderRole,
+		&i.Status,
+		&i.MfaEnrolled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const setTotpSecret = `-- name: SetTotpSecret :exec

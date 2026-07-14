@@ -12,16 +12,16 @@ package grpcserver
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 
 	cerr "github.com/OmniSurg/omnisurg-go-common/errors"
 	mw "github.com/OmniSurg/omnisurg-go-common/middleware"
 	"github.com/OmniSurg/omnisurg-identity-service/internal/model"
+	"github.com/OmniSurg/omnisurg-identity-service/internal/security"
 	"github.com/OmniSurg/omnisurg-identity-service/internal/service"
 	commonv1 "github.com/OmniSurg/omnisurg-proto/gen/go/omnisurg/common/v1"
 	identityv1 "github.com/OmniSurg/omnisurg-proto/gen/go/omnisurg/identity/v1"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Server implements identityv1.IdentityServiceServer as a thin adapter over the
@@ -274,6 +274,66 @@ func (s *Server) UpdateUser(ctx context.Context, req *identityv1.UpdateUserReque
 	return toProtoUser(u), nil
 }
 
+// ProvisionUser creates a pending user (no usable password) plus an
+// activation token, awaiting the operator to set their own password through
+// the activation link. RBAC is identical to CreateUser (practice admin within
+// the caller tenant, or a provider cross tenant under the minted JWT). Phone
+// is required (the activation SMS recipient); PII encryption and the blind
+// index happen in the service and repository, unchanged.
+func (s *Server) ProvisionUser(ctx context.Context, req *identityv1.ProvisionUserRequest) (*identityv1.ProvisionUserResponse, error) {
+	g, err := s.caller(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if perr := requireUserAdmin(g); perr != nil {
+		return nil, perr
+	}
+	role := firstRole(req.GetRoles())
+	branchID, bok := firstBranchID(req.GetBranchIds())
+	if !bok {
+		return nil, cerr.ToStatus(model.ErrValidation.WithDetails([]map[string]string{{"field": "branch_ids", "issue": "must be valid uuids"}}))
+	}
+	res, perr2 := s.users.ProvisionAdmin(ctx, g.caller, model.NewPendingUser{
+		Email:       req.GetEmail(),
+		Phone:       req.GetPhone(),
+		DisplayName: req.GetDisplayName(),
+		Role:        role,
+		BranchID:    branchID,
+	})
+	if perr2 != nil {
+		return nil, cerr.ToStatus(perr2)
+	}
+	return &identityv1.ProvisionUserResponse{
+		User:                toProtoUser(res.User),
+		ActivationToken:     res.RawToken,
+		ActivationExpiresAt: timestamppb.New(res.ExpiresAt),
+	}, nil
+}
+
+// ResendActivation invalidates any outstanding activation token for the named
+// pending user and issues a fresh one. Gated identically to ProvisionUser.
+func (s *Server) ResendActivation(ctx context.Context, req *identityv1.ResendActivationRequest) (*identityv1.ResendActivationResponse, error) {
+	g, err := s.caller(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if perr := requireUserAdmin(g); perr != nil {
+		return nil, perr
+	}
+	userID, perr := parseUUID(req.GetUserId().GetValue())
+	if perr != nil {
+		return nil, perr
+	}
+	res, rerr := s.users.ResendActivation(ctx, g.caller, userID)
+	if rerr != nil {
+		return nil, cerr.ToStatus(rerr)
+	}
+	return &identityv1.ResendActivationResponse{
+		ActivationToken:     res.RawToken,
+		ActivationExpiresAt: timestamppb.New(res.ExpiresAt),
+	}, nil
+}
+
 // firstRole returns the canonical role string for the first role in the repeated
 // proto field, or empty when none is set. The P1 user model carries a single
 // role; an empty string is rejected by the service validation as an invalid role.
@@ -286,14 +346,11 @@ func firstRole(roles []commonv1.Role) string {
 	return ""
 }
 
-// randomTempPassword returns a url safe random string used as the provisioning
-// temporary password: 24 random bytes encoded to a 32 char url-safe string. It
-// comfortably exceeds the service minimum length and is never returned to the
-// caller; the user resets it via the invite flow.
+// randomTempPassword returns a cryptographically random, url safe temporary
+// password for a directly created user (CreateUser). It comfortably exceeds
+// the service minimum length and is never returned to the caller; the user
+// resets it via the invite flow. Shares the same random primitive
+// ProvisionUser's discard password uses (security.RandomUnusablePassword).
 func randomTempPassword() (string, error) {
-	buf := make([]byte, 24)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
+	return security.RandomUnusablePassword()
 }

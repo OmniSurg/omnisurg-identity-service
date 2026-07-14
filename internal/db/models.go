@@ -19,6 +19,17 @@ type AuditLog struct {
 	OccurredAt pgtype.Timestamptz
 }
 
+type CredentialToken struct {
+	ID         pgtype.UUID
+	TenantID   pgtype.UUID
+	UserID     pgtype.UUID
+	Purpose    string
+	TokenHash  []byte
+	ExpiresAt  pgtype.Timestamptz
+	ConsumedAt pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+}
+
 type CryptoKey struct {
 	ID         pgtype.UUID
 	WrappedDek []byte
@@ -51,4 +62,5 @@ type User struct {
 	UpdatedAt      pgtype.Timestamptz
 	TotpSecret     []byte
 	TotpLastStep   *int64
+	PhoneEncrypted []byte
 }

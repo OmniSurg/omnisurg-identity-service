@@ -57,6 +57,10 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	// Provider (platform) login is public and takes no tenant header. It mints a
 	// tenant less JWT carrying a provider role.
 	grp.POST("/provider/login", wrapper.ProviderLogin)
+	// Activate is public and pre auth, like login: the one time token in the
+	// body IS the credential, so no Authorization header or tenant header is
+	// required or accepted. Behind the same pre-auth posture as login.
+	grp.POST("/activate", wrapper.Activate)
 
 	authed := grp.Group("", mw.JWTAuth(cfg.JWTSecret))
 	authed.GET("/me", wrapper.GetMe)

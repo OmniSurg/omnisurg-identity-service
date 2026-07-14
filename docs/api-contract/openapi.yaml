@@ -90,6 +90,16 @@ components:
           enum: [true]
         data:
           $ref: '#/components/schemas/LoginData'
+    ActivateRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token:
+          type: string
+          minLength: 1
+        new_password:
+          type: string
+          minLength: 8
     ProviderLoginData:
       type: object
       required: [token, mfa_status]
@@ -420,6 +430,58 @@ paths:
         audit_action: "identity.provider_login"
         idempotency_required: false
         encryption_fields: ["email"]
+  /api/v1/identity/activate:
+    post:
+      operationId: activate
+      summary: Set a password for a pending account and sign in
+      tags: [auth]
+      description: >-
+        Public, pre auth, like login: consumes a one time activation token
+        (issued when a practice admin was provisioned), sets the caller's
+        chosen password, activates the account, and mints a session exactly
+        like login (auto sign in). Never reachable with an Authorization
+        header requirement; the token in the body IS the credential.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivateRequest'
+      responses:
+        '200':
+          description: Activated and signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: The token is unknown, wrong purpose, expired, or already consumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-fr:
+        - "returns 200 with a signed JWT and the user body, auto signing the caller in, when the token is valid, unexpired, and unconsumed and new_password is at least 8 characters"
+        - "activates the user (status becomes active) and consumes the credential token so it cannot be reused"
+        - "sets the caller's chosen password; a subsequent login with it succeeds"
+        - "returns 401 AUTH_ACTIVATION_INVALID when the token is unknown, wrong purpose, expired, or already consumed"
+        - "returns 422 VALIDATION_FAILED when new_password is missing or shorter than 8 characters, checked before the token is looked up"
+        - "does not reveal whether a token exists, has expired, or was already consumed; every invalid case returns the same AUTH_ACTIVATION_INVALID"
+        - "writes an identity.activate audit log row for the newly activated user"
+      x-nfr:
+        latency_ms_p99: 400
+        rate_limit: "10/min/ip"
+        auth_required: false
+        tenant_scoped: true
+        audit_action: "identity.activate"
+        idempotency_required: false
+        encryption_fields: ["email", "phone"]
   /api/v1/identity/provider/totp/enroll:
     post:
       operationId: providerTotpEnroll
